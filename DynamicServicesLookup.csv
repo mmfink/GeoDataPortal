@@ -1,0 +1,38 @@
+GDP Title,VisTrails module name
+800m Downscaled NEX CMIP5 Climate Projections for the Continental US,NEX_800m
+Bias Corrected Constructed Analogs V2 Daily Climate Projections,BCCA_GDO_V2
+Bias Corrected Spatially Downscaled Monthly Climate Predictions,Mauer_BCSD_CMIP3
+Bias Corrected Spatially Downscaled Monthly CMIP5 Climate Projections,BCSD_GDO
+CIG Northern US Rockies and Pacific Northwest Statistical Downscaling,skip
+Conterminous U.S. actual evapotranspiration data,Actual_ET_from_WaterSmart
+Daily Statistically Downscaled Climate Projections for the US and southern Canada east of the Rocky Mountains.,skip
+"Daymet: Daily surface weather on a 1km grid for North America, 1980-2012",DAYMET_NorthAmerica
+Eighth degree-CONUS Daily Downscaled Climate Projections by Katharine Hayhoe,Hayhoe_EighthDegree
+Experimental National Elevation Dataset DEM WCS,skip
+Experimental SSURGO Derived Hydrologic Soil Properties,skip
+Global Land Data Assimilation System,GlobalLandDataAssimilationSystem
+Great Lakes Coastal Forecasting System Nowcast/Lake Erie Nowcast History 2D,skip
+Great Lakes Coastal Forecasting System Nowcast/Lake Huron Nowcast History 2D,skip
+Great Lakes Coastal Forecasting System Nowcast/Lake Michigan Nowcast History 2D,skip
+Great Lakes Coastal Forecasting System Nowcast/Lake Ontario Nowcast History 2D,skip
+Great Lakes Coastal Forecasting System Nowcast/Lake Superior Nowcast History 2D,skip
+"Gridded Observed Meteorological Data, 1950-1999",Maurer_GriddedObservedMeteorologicalData_1950-1999
+Gridded Observed Meteorological Data: 1949-2010,Maurer_GriddedObservedMeteorologicalData_1949-2010
+Half degree-Alaska Daily Downscaled Climate Projections by Katharine Hayhoe,skip
+ICLUS v1.3 Housing Density Classification Projections for the Conterminous USA,ICLUS_1.3_HousingDensity
+ICLUS v1.3 Raw Housing Density and Impervious Surface Projections for the Conterminous USA,ICLUS_1.3RawHousingDensity
+Mean Monthly Evaporation Atlas for the Contiguous 48 United States (1956-1970),skip
+Normal Incident Solar Radiation Atlas,NREL_SolarRadiation 
+North American Land Data Assimilation System Phase 2,skip
+Parameter-elevation Regressions on Independent Slopes Model Monthly Climate Data for the Continental United States.,PRISM_4km_timeseries
+Real Time River Forecasting Center Quantitative Precipitation Estimate,skip
+River Forecasting Center Quantitative Precipitation Estimate Archive,skip
+River Forecasting Center Quantitative Precipitation Estimates - National Mosaic,skip
+Sea Level Rise Projections for DSL-SAMBI,skip
+Statistically downscaled GCM data using Bias Corrected Constructed Analogs (BCCA) CMIP5 Climate Daily Projections,Thrasher_BCCA_CMIP5
+STATSGO2 MUIDs,skip
+Thermosteric Sea Level Rise Projections with Parametric Uncertainty,skip
+University of Idaho Daily Meteorological data for continental US,UofI_METDATA
+Urban Growth Projection for DSL-SAMBI,skip
+Urban Growth Projection for Southeast Regional Assessment Project,skip
+USGS Dynamical Downscaled Regional Climate,USGSDynamicalDownscaledRegionalClimate

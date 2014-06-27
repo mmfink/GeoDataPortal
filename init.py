@@ -23,43 +23,41 @@ import dateutil
 import hashlib
 import zipfile
 import glob
+import csv
 
 from osgeo import ogr
 from osgeo import osr
 
-try:
-    from vistrails.core.modules.vistrails_module import Module, new_module, ModuleError
-    from vistrails.core.modules.basic_modules import File, Directory, Dictionary
-    #  TODO: move this import and the two config widgets to a separate file
-    from vistrails.gui.modules.module_configure import StandardModuleConfigurationWidget
-except ImportError:
-    from core.modules.vistrails_module import Module, new_module, ModuleError
-    from core.modules.basic_modules import File, Directory, Dictionary
-    #  TODO: move this import and the two config widgets to a separate file
-    from gui.modules.module_configure import StandardModuleConfigurationWidget
-
+from vistrails.core.modules.vistrails_module import Module, new_module, ModuleError
+from vistrails.core.modules.basic_modules import File, Directory, Dictionary
+from vistrails.core.modules.vistrails_module import ModuleSuspended
+from vistrails.gui.modules.module_configure import StandardModuleConfigurationWidget
+from vistrails.core import system
 
 from PyQt4 import QtGui, QtCore
 
 import pyGDP as _pyGDP
 import picklists, utils, ParseGDPOutput
 
-from sahm.pySAHM import SpatialUtilities
+import SpatialUtilities
 
 identifier = 'gov.usgs.GeoDataPortal'
 pyGDP = _pyGDP.pyGDPwebProcessing()
 
-global _cida_dataTypes
-_cida_dataTypes = {}
+global _cida_datatypes
+_cida_datatypes = {}
 ''' This is a global dictionary that stores all parameters from CIDA
 since there is a cost for each query we are caching the returned values
 in this dictionary so we only have to make each request once per session.
 so that we don't have to make requests multiple times.
 The format is {serviceName: {'abstract':<abstract>,
-                            'URIs':[<URI1>, <URI2>,...]
-                            'dataTypes':{datasetName:{'startDate':<date>,
-                                        'endDate':<date>}
-                        }}}
+                            'URIs':{<URI1>:{'datasets':{<dataset_name>:{long_name':<long name>}
+                                                                        }
+                                            'start_date:<start date>,
+                                            'end_date':<end date>
+                                            }
+                                    }
+                            }
 '''
 
 
@@ -111,7 +109,7 @@ class pyGDP_function(Module):
 
         self.startTime = self.inputs['data_service_parameters']['startDate']
         self.endTime = self.inputs['data_service_parameters']['endDate']
-        self.varID = self.inputs['data_service_parameters']['dataType']
+        self.varID = self.inputs['data_service_parameters']['dataType'][0]
 
         self.geoType = self.inputs['shapefile_parameters']['File']
         self.dataSetURI = self.inputs['data_service_parameters']['URI']
@@ -188,7 +186,7 @@ class feature_weighted_grid_statistics(pyGDP_function):
 
         origdir = os.getcwd()
         os.chdir(utils.get_root_dir())
-        print os.getcwd()
+#          print os.getcwd()
         self.outfile = pyGDP.submitFeatureWeightedGridStatistics("upload:" + self.geoType,
                                 self.dataSetURI, self.varID,
                                 self.startTime, self.endTime, **self.kwargs)
@@ -217,7 +215,7 @@ polygons that are submitted. No clipping to the shapefile edges is performed.
     _input_ports = list(pyGDP_function._input_ports)
     _input_ports.extend([])
 
-    _output_ports = [('output_file_list', '(edu.utah.sci.vistrails.basic:List)'), ]
+    _output_ports = [('output_file_dict', '(edu.utah.sci.vistrails.basic:Dictionary)')]
 
     def __init__(self):
         pyGDP_function.__init__(self)
@@ -237,22 +235,45 @@ polygons that are submitted. No clipping to the shapefile edges is performed.
 
         origdir = os.getcwd()
         os.chdir(utils.get_root_dir())
-        print os.getcwd()
+#          print os.getcwd()
 
-        outputs = []
+        outputs = {}
+
         for var_id in self.varID:
-            outfile = pyGDP.submitFeatureCoverageOPenDAP("upload:" + self.geoType,
-                                    self.dataSetURI, var_id,
+            run_info = {'request_type':'OPeNDAP', 'geotype':self.geoType,
+                          'uri':self.dataSetURI, 'var_id':var_id,
+                          'start':self.startTime, 'end':self.endTime,
+                          'other':self.kwargs}
+            if var_id.startswith('BCCA'):
+                run_info.update(utils.get_bcca_info(var_id))
+
+            outfname, already_run = utils.get_outfname(run_info)
+            if already_run:
+                print "This run was completed previously.\n\tPrevious file: ..\\" + outfname
+            else:
+                print "Starting processing of " + str(var_id)
+                outfile = pyGDP.submitFeatureCoverageOPenDAP("upload:" + self.geoType,
+                                    self.dataSetURI.replace("http:", "dods:"), var_id,
                                     self.startTime, self.endTime, **self.kwargs)
 
-            outfname = os.path.join(utils.get_root_dir(), outfile)
-            renamed = os.path.splitext(outfname)[0] + self.output_extension
-            os.rename(outfname, renamed)
-            outputs.append(renamed)
+                result_fname = os.path.join(utils.get_root_dir(), outfile)
+                if len(outfname) > 255 and \
+                                system.systemType in ['Microsoft', 'Windows']:
+                    outfname = u"\\\\?\\" + unicode(outfname)
+
+                os.rename(result_fname, outfname)
+
+                utils.write_hash_entry_pickle(outfname, run_info)
+
+                print "Finished with: ", os.path.split(outfname)[1]
+            outputs[os.path.join(utils.get_root_dir(), outfname)] = run_info
+        print "Finished with all."
 
         os.chdir(origdir)
-        self.setResult('output_file_list', outputs)
+        self.setResult('output_file_dict', outputs)
+
         print "Done"
+
 
 class SubmitCustomBioclim(pyGDP_function):
     '''submitCustomBioclim (development, only available on USGS network)
@@ -287,7 +308,7 @@ an data service.  The result is a series of geotiffs
         pyGDP_function.compute(self)
 
         self.kwargs = {}
-        self.kwargs['bbox_in'] = self.get_bbox_from_shape_params(self.inputs['shapefile_parameters'])
+        self.kwargs['bbox_in'] = get_bbox_from_shape_params(self.inputs['shapefile_parameters'])
         self.kwargs['OPeNDAP_URI'] = self.inputs['data_service_parameters']['URI']
         self.kwargs['start'] = dateutil.parser.parse(self.inputs['data_service_parameters']['startDate']).year
         self.kwargs['end'] = dateutil.parser.parse(self.inputs['data_service_parameters']['endDate']).year
@@ -331,35 +352,6 @@ an data service.  The result is a series of geotiffs
 
         print 'Done'
 
-
-    def get_bbox_from_shape_params(self, shape_params):
-        '''returns a bbox () based on the selected features in a
-        shapefile param dictionary
-
-        returns:  The bounding box to use
-                four item tuple (max long, min lat, min long, max lat)
-        '''
-        driver = ogr.GetDriverByName('ESRI Shapefile')
-        datasource = driver.Open(shape_params['local_fname'], 0)
-        layer = datasource.GetLayer(0)
-
-        feature = layer.GetNextFeature()
-
-        geomcol = ogr.Geometry(ogr.wkbGeometryCollection)
-        value = shape_params['Value']
-        while feature:
-            if (str(feature.GetField(shape_params['Field']))
-               in value) or value == 'all_values':
-                #  we are including this feature
-                geomcol.AddGeometry(feature.GetGeometryRef())
-            feature.Destroy()
-            feature = layer.GetNextFeature()
-        datasource.Destroy()
-
-        envelope = list(geomcol.GetEnvelope())
-        bbox = [envelope[1], envelope[2], envelope[0], envelope[3]]
-        return bbox
-
     def lookup_default_vars(self):
         '''return the default var names pased on the input data service
         '''
@@ -379,45 +371,98 @@ an data service.  The result is a series of geotiffs
                 else:
                     self.kwargs[var] = defaults[var]
 
+def get_bbox_from_shape_params(shape_params):
+    '''returns a bbox () based on the selected features in a
+    shapefile param dictionary
+
+    returns:  The bounding box to use
+            four item tuple (max long, min lat, min long, max lat)
+    '''
+    driver = ogr.GetDriverByName('ESRI Shapefile')
+    datasource = driver.Open(shape_params['local_fname'], 0)
+    layer = datasource.GetLayer(0)
+
+    feature = layer.GetNextFeature()
+
+    geomcol = ogr.Geometry(ogr.wkbGeometryCollection)
+    value = shape_params['Value']
+    while feature:
+        if (str(feature.GetField(shape_params['Field']))
+           in value) or value == 'all_values':
+            #  we are including this feature
+            geomcol.AddGeometry(feature.GetGeometryRef())
+        feature.Destroy()
+        feature = layer.GetNextFeature()
+    datasource.Destroy()
+
+    envelope = list(geomcol.GetEnvelope())
+    bbox = [envelope[1], envelope[2], envelope[0], envelope[3]]
+    return bbox
 
 class GDPServiceConfiguration(StandardModuleConfigurationWidget):
-    def __init__(self, module, controller, parent=None):
 
+    def __init__(self, module, controller, parent=None):
+        """Make sure we have decent default values for URI, datatypes,
+        startdate and enddate.
+        If we're coming up with these for the first time then update the vistrail
+        so they show up in the module properties box.
+        """
         StandardModuleConfigurationWidget.__init__(self, module, controller,
                    parent)
         self.setWindowTitle(module.name)
 
-        global _cida_dataTypes
-
-        self.store_datatypes(self.module.name)
+        global _cida_datatypes
 
         self.URI = utils.getPortValue(self, "URI")
+
         if not self.URI:
-            self.URI = _cida_dataTypes[self.module.name]["URIs"][0]
+            self.URI = _cida_datatypes[self.module.name]["URIs"].iterkeys().next()
             utils.update_vistrail(self, "URI", [self.URI])
 
-        self.dataTypes = utils.get_port_value_list(self, "dataType")
-        if not self.dataTypes:
-            self.dataTypes = [self.get_default_datatype(self.module.name), ]
-            utils.update_vistrail(self, "dataType", self.dataTypes)
+        self.orig_URI = self.URI
 
-        for dataType in self.dataTypes:
-            self.storeTimeRange(self.module.name, dataType)
+        self.store_datasets(self.module.name, self.URI)
 
-        for datetype in ["start", "end"]:
-            self.__dict__[datetype + "Date"] = utils.getPortValue(self,
-                                                            datetype + "Date")
-            if not self.__dict__[datetype + "Date"]:
-                self.__dict__[datetype + "Date"] = \
-                                self.get_datatype_date(self.module.name,
-                                self.dataTypes[0], datetype)
-                utils.update_vistrail(self, datetype + "Date",
-                                      [self.__dict__[datetype + "Date"]])
+        datatypes = utils.getPortValue(self, "dataType")
+        if datatypes:
+            self.datatypes = eval(datatypes)
+        else:
+            self.datatypes = [self.get_default_datatype(self.module.name, self.URI), ]
+            utils.update_vistrail(self, "dataType", [self.datatypes])
+
+        if not self.datatypes or self.datatypes == ['']:
+            del _cida_datatypes[self.module.name]["URIs"][self.URI]
+            self.URI = _cida_datatypes[self.module.name]["URIs"].iterkeys().next()
+            utils.update_vistrail(self, "URI", [self.URI])
+            self.store_datasets(self.module.name, self.URI)
+            self.datatypes = [self.get_default_datatype(self.module.name, self.URI), ]
+            utils.update_vistrail(self, "dataType", [self.datatypes])
+            
+        self.orig_datatypes = self.datatypes
+
+        self.store_time_range(self.module.name, self.URI)
+
+        self.startDate = utils.getPortValue(self, "startDate")
+        self.endDate = utils.getPortValue(self, "endDate")
+        if self.URI and not self.startDate:
+            self.startDate = self.get_uri_date(self.module.name,
+                        uri=self.URI, which_one="start")
+            utils.update_vistrail(self, "startDate", [self.startDate])
+        if self.URI and not self.endDate:
+            self.endDate = self.get_uri_date(self.module.name,
+                        uri=self.URI, which_one="end")
+            utils.update_vistrail(self, "endDate", [self.endDate])
+
+        self.orig_startDate = self.startDate
+        self.orig_endDate = self.endDate
+
         self.build_gui()
+        self.populate_service_config()
+        self.state_changed = False
 
     def build_gui(self):
 
-        global _cida_dataTypes
+        global _cida_datatypes
 
         QtGui.QWidget.__init__(self)
 
@@ -427,20 +472,17 @@ class GDPServiceConfiguration(StandardModuleConfigurationWidget):
         uriLabel = QtGui.QLabel("Available URIs: ")
         urilayout.addWidget(uriLabel)
         self.URI_combobox = QtGui.QComboBox(self)
+        self.URI_combobox.setEditable(True)
         self.URI_combobox.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Maximum)
-        for uri in _cida_dataTypes[self.module.name]["URIs"]:
-            if not uri is None:
+        for uri in _cida_datatypes[self.module.name]["URIs"].iterkeys():
+            if not uri is None and not uri.endswith("request=GetCapabilities") \
+                and not uri.endswith("dataset.html"):
                 self.URI_combobox.addItem(uri)
-        try:
-            curIndex = [i for i in range(self.URI_combobox.count()) if self.URI_combobox.itemText(i) == self.URI][0]
-        except IndexError:
-            curIndex = -1
-
-        self.URI_combobox.setCurrentIndex(curIndex)
         urilayout.addWidget(self.URI_combobox)
         layout.addLayout(urilayout)
 
-        QtCore.QObject.connect(self.URI_combobox, QtCore.SIGNAL("currentIndexChanged(QString)"), self.changed_URI)
+        self.URI_combobox.currentIndexChanged.connect(self.changed_field)
+        self.URI_combobox.editTextChanged.connect(self.changed_field)
 
         dataTypelayout = QtGui.QHBoxLayout()
         dataTypeLabel = QtGui.QLabel("Available Data Types: ")
@@ -453,14 +495,51 @@ class GDPServiceConfiguration(StandardModuleConfigurationWidget):
         self.datatypes_treeview.headerItem().setText(1, "description")
         self.datatypes_treeview.setColumnWidth(1, 125)
         self.datatypes_treeview.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
-        self.populate_datatypes()
-        self.datatypes_treeview.itemChanged.connect(self.changed_datatype)
 
         dataTypelayout.addWidget(self.datatypes_treeview)
         layout.addLayout(dataTypelayout)
 
-        minStart = _cida_dataTypes[self.module.name]["dataTypes"][self.dataTypes[0]]['startDate']
-        self.startdate_label = QtGui.QLabel("Start Date: \n(min = " + minStart + ")")
+        self.buttonLayout = QtGui.QHBoxLayout()
+        self.buttonLayout.setMargin(5)
+
+        self.selectAllButton = QtGui.QPushButton('&Select All', self)
+        self.selectAllButton.setFixedWidth(110)
+        self.buttonLayout.addWidget(self.selectAllButton)
+
+        self.switchSelectionButton = QtGui.QPushButton('&Switch Selection', self)
+        self.switchSelectionButton.setFixedWidth(110)
+        self.buttonLayout.addWidget(self.switchSelectionButton)
+
+        spacerItem = QtGui.QSpacerItem(10, 0, QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Minimum)
+        self.buttonLayout.addItem(spacerItem)
+
+        self.queryLabel = QtGui.QLabel("Query")
+        self.buttonLayout.addWidget(self.queryLabel)
+
+        self.queryText = QtGui.QLineEdit(self)
+        self.queryText.setFixedWidth(110)
+        self.buttonLayout.addWidget(self.queryText)
+
+        self.addQuery = QtGui.QPushButton('&Add', self)
+        self.addQuery.setFixedWidth(60)
+        self.buttonLayout.addWidget(self.addQuery)
+
+        self.removeQuery = QtGui.QPushButton('&Remove', self)
+        self.removeQuery.setFixedWidth(60)
+        self.buttonLayout.addWidget(self.removeQuery)
+
+        self.connect(self.selectAllButton, QtCore.SIGNAL('clicked(bool)'),
+                     self.select_all)
+        self.connect(self.switchSelectionButton, QtCore.SIGNAL('clicked(bool)'),
+                     self.switch_selection)
+        self.connect(self.addQuery, QtCore.SIGNAL('clicked(bool)'),
+                     self.query_add)
+        self.connect(self.removeQuery, QtCore.SIGNAL('clicked(bool)'),
+                     self.query_remove)
+
+        layout.addLayout(self.buttonLayout)
+
+        self.startdate_label = QtGui.QLabel("NA")
         startlayout = QtGui.QHBoxLayout()
         startlayout.addWidget(self.startdate_label)
         self.startDateText = QtGui.QLineEdit(self)
@@ -469,12 +548,8 @@ class GDPServiceConfiguration(StandardModuleConfigurationWidget):
         startlayout.addWidget(self.startDateText)
         layout.addLayout(startlayout)
 
-        QtCore.QObject.connect(self.startDateText,
-                QtCore.SIGNAL("textChanged(QString)"), self.startDateChanged)
-
-        maxEnd = _cida_dataTypes[self.module.name]["dataTypes"][self.dataTypes[0]]['endDate']
-        self.enddate_label = QtGui.QLabel("End Date: \n(max = " + maxEnd + ")")
         endlayout = QtGui.QHBoxLayout()
+        self.enddate_label = QtGui.QLabel("NA")
         endlayout.addWidget(self.enddate_label)
         self.endDateText = QtGui.QLineEdit(self)
         self.endDateText.setEnabled(True)
@@ -484,105 +559,325 @@ class GDPServiceConfiguration(StandardModuleConfigurationWidget):
         endlayout.addWidget(self.endDateText)
         layout.addLayout(endlayout)
 
-        QtCore.QObject.connect(self.endDateText,
-                    QtCore.SIGNAL("textChanged(QString)"), self.endDateChanged)
+        save_layout = QtGui.QHBoxLayout()
+        save_layout.setMargin(5)
+
+        self.OK = QtGui.QPushButton('&OK', self)
+        self.OK.setFixedWidth(110)
+        save_layout.addWidget(self.OK)
+        self.Cancel = QtGui.QPushButton('&Cancel', self)
+        self.Cancel.setFixedWidth(110)
+        save_layout.addWidget(self.Cancel)
+        layout.addLayout(save_layout)
+        self.connect(self.OK, QtCore.SIGNAL('clicked(bool)'),
+                     self.save_changes)
+        self.connect(self.Cancel, QtCore.SIGNAL('clicked(bool)'),
+                     self.close)
 
         self.setLayout(layout)
 
-    def store_datatypes(self, serviceName):
+    def ok_selected(self):
+        self.save_changes()
+        self.close()
+
+    def saveTriggered(self):
+        self.save_changes()
+
+    def resetTriggered(self):
+        self.close()
+
+    def save_changes(self):
+        functions = [('URI', [self.URI])]
+        self.controller.update_functions(self.module, functions)
+        functions = [("dataType", [str(self.datatypes)])]
+        self.controller.update_functions(self.module, functions)
+        functions = [("startDate", [self.startDate])]
+        self.controller.update_functions(self.module, functions)
+        functions = [("endDate", [self.endDate])]
+        self.controller.update_functions(self.module, functions)
+        self.state_changed = False
+        self.close()
+
+#          utils.update_vistrail(self, 'URI', [self.URI])
+#          utils.update_vistrail(self, "dataType", [self.datatypes])
+#          utils.update_vistrail(self, "startDate", [self.startDate])
+#          utils.update_vistrail(self, "endDate", [self.endDate])
+#          self.state_changed = False
+
+    def cancel_changes(self):
+        self.URI = self.orig_URI
+        self.datatypes = self.orig_datatypes
+        self.startDate = self.orig_startDate
+        self.endDate = self.orig_endDate
+        self.populate_service_config()
+#          self.state_changed = False
+
+    def select_all(self):
+        try:
+            self.datatypes_treeview.itemChanged.disconnect()
+        except TypeError:
+            pass
+        treeviewIter = QtGui.QTreeWidgetItemIterator(self.datatypes_treeview)
+        self.datatypes = []
+        while treeviewIter.value():
+            item = treeviewIter.value()
+            item.setCheckState(0, QtCore.Qt.Checked)
+            self.datatypes.append(str(item.text(0)))
+            treeviewIter += 1
+#          self.state_changed = True
+        self.datatypes_treeview.itemChanged.connect(self.changed_checked_field_values)
+
+    def switch_selection(self):
+        try:
+            self.datatypes_treeview.itemChanged.disconnect()
+        except TypeError:
+            pass
+        treeviewIter = QtGui.QTreeWidgetItemIterator(self.datatypes_treeview)
+        self.datatypes = []
+        while treeviewIter.value():
+            item = treeviewIter.value()
+            if item.checkState(0) == QtCore.Qt.Checked:
+                item.setCheckState(0, QtCore.Qt.Unchecked)
+            else:
+                item.setCheckState(0, QtCore.Qt.Checked)
+                self.datatypes.append(str(item.text(0)))
+            treeviewIter += 1
+#          self.state_changed = True
+        self.datatypes_treeview.itemChanged.connect(self.changed_checked_field_values)
+
+    def query_add(self, query_text):
+        self.datatypes_treeview.blockSignals(True)
+        itemsChecked = 0
+        treeviewIter = QtGui.QTreeWidgetItemIterator(self.datatypes_treeview)
+        while treeviewIter.value():
+            item = treeviewIter.value()
+            if str(self.queryText.text()) in item.text(0) or \
+                str(self.queryText.text()) in item.text(1):
+                self.datatypes.append(str(item.text(0)))
+                if item.checkState(0) == QtCore.Qt.Unchecked:
+                    item.setCheckState(0, QtCore.Qt.Checked)
+                    itemsChecked += 1
+            treeviewIter += 1
+        self.datatypes_treeview.blockSignals(False)
+#          self.state_changed = True
+
+        msgbox = QtGui.QMessageBox(self)
+        msgbox.setText(str(itemsChecked) + " items selected.")
+        msgbox.exec_()
+
+    def query_remove(self, query_text):
+        try:
+            self.datatypes_treeview.itemChanged.disconnect()
+        except TypeError:
+            pass
+        itemsUnchecked = 0
+        treeviewIter = QtGui.QTreeWidgetItemIterator(self.datatypes_treeview)
+        while treeviewIter.value():
+            item = treeviewIter.value()
+            if str(self.queryText.text()) in item.text(0) or \
+                str(self.queryText.text()) in item.text(1):
+                if self.datatypes.count(str(item.text(0))) > 0:
+                    self.datatypes.remove(str(item.text(0)))
+                if item.checkState(0) == QtCore.Qt.Checked:
+                    item.setCheckState(0, QtCore.Qt.Unchecked)
+                    itemsUnchecked += 1
+            treeviewIter += 1
+        self.datatypes_treeview.itemChanged.connect(self.changed_checked_field_values)
+#          self.state_changed = True
+        msgbox = QtGui.QMessageBox(self)
+        msgbox.setText(str(itemsUnchecked) + " items deselected.")
+        msgbox.exec_()
+
+    def check_uri(self, uri):
+        global _cida_datatypes
+        self.store_datasets(self.module.name, uri)
+        if not "":
+            pass
+
+    def update_datatypes(self, uri=None):
+        global _cida_datatypes
+        self.store_datasets(self.module.name, self.URI)
+        uri_info = _cida_datatypes[self.module.name]["URIs"][self.URI]
+
+        available_datasets = list(uri_info['datasets'].iterkeys())
+
+        self.datatypes[:] = [dt for dt in self.datatypes if dt in available_datasets]
+
+        if not self.datatypes:
+            self.datatypes = [self.get_default_datatype(self.module.name, self.URI)]
+
+    def populate_service_config(self):
+        self.disconnect_all()
+
+        try:
+            curIndex = [i for i in range(self.URI_combobox.count()) if self.URI_combobox.itemText(i) == self.URI][0]
+            self.URI_combobox.setCurrentIndex(curIndex)
+        except IndexError:
+            curIndex = -1
+        self.URI_combobox.currentIndexChanged.connect(self.changed_field)
+
+        self.populate_datatypes()
+        self.datatypes_treeview.itemChanged.connect(self.changed_checked_field_values)
+
+        maxEnd = _cida_datatypes[self.module.name]['URIs'][self.URI]['end_date']
+        self.enddate_label.setText("End Date: \n(max = " + maxEnd + ")")
+        if not str(self.endDateText.text()):
+            self.endDateText.setText(maxEnd)
+
+        self.endDateText.textChanged.connect(self.endDateChanged)
+
+        minStart = _cida_datatypes[self.module.name]['URIs'][self.URI]['start_date']
+        self.startdate_label.setText("Start Date: \n(min = " + minStart + ")")
+        if not str(self.startDateText.text()):
+            self.startDateText.setText(minStart)
+        self.startDateText.textChanged.connect(self.startDateChanged)
+
+    def store_datasets(self, serviceName, uri):
         '''Populate the global CIDA_datatypes dictionary if it has not been
         previously done.
         '''
-        global _cida_dataTypes
-        if not _cida_dataTypes[serviceName].has_key("dataTypes"):
-            dataTypes = []
-            while not dataTypes and _cida_dataTypes[serviceName]['URIs']:
-                URI = _cida_dataTypes[serviceName]['URIs'][0]
-                dataTypes = dict(zip(pyGDP.getDataType(URI),
-                                     pyGDP.getDataLongName(URI)))
-                if not dataTypes:
-                    _cida_dataTypes[serviceName]['URIs'].pop(0)
+        global _cida_datatypes
 
-            _cida_dataTypes[serviceName]["dataTypes"] = {}
-            for dataType, longName in dataTypes.iteritems():
-                print dataType, longName
-                _cida_dataTypes[serviceName]["dataTypes"][dataType] = \
-                                                        {'longName':longName}
+        if not _cida_datatypes[serviceName]['URIs'].has_key(uri):
+            _cida_datatypes[serviceName]['URIs'][uri] = {}
+
+        if not uri:
+            _cida_datatypes[serviceName]['URIs'][uri]["datasets"] = {}
+        elif not _cida_datatypes[serviceName]['URIs'][uri].has_key('datasets'):
+            pyGDP.sleepSecs = 1
+            pyGDP.WPS_attempts = 1
+            try:
+                data_types = pyGDP.getDataType(uri)
+                long_names = pyGDP.getDataLongName(uri)
+                datasets = dict(zip(data_types, long_names))
+            except:
+                datasets = None
+
+            _cida_datatypes[serviceName]['URIs'][uri]["datasets"] = {}
+            if datasets:
+                for dataset, long_name in datasets.iteritems():
+                    _cida_datatypes[serviceName]['URIs'][uri]['datasets'][dataset] = \
+                                                        {'long_name':long_name}
 
     def populate_datatypes(self):
         '''load the existing data type descriptions in the data_types_treeview
         '''
-        for dataType in _cida_dataTypes[self.module.name]["dataTypes"].iterkeys():
-            longName = _cida_dataTypes[self.module.name]["dataTypes"][dataType]["longName"]
-            child_item = QtGui.QTreeWidgetItem([dataType, longName])
+        self.datatypes_treeview.clear()
+        global _cida_datatypes
+        self.store_datasets(self.module.name, self.URI)
+        uri_info = _cida_datatypes[self.module.name]["URIs"][self.URI]
+
+        for dataset, vals in uri_info['datasets'].iteritems():
+            description = vals['long_name']
+            child_item = QtGui.QTreeWidgetItem([dataset, description])
             child_item.setFlags(QtCore.Qt.ItemIsUserCheckable |
                                 QtCore.Qt.ItemIsEnabled)
-            if dataType in self.dataTypes:
+            if dataset in self.datatypes:
                 child_item.setCheckState(0, QtCore.Qt.Checked)
             else:
                 child_item.setCheckState(0, QtCore.Qt.Unchecked)
             self.datatypes_treeview.addTopLevelItem(child_item)
 
-    def get_default_datatype(self, service_name):
+    def get_default_datatype(self, service_name, uri):
         '''Returns a random datatype from the list of available datatypes
         associated with a single service to use as the 'default'
         '''
-        global _cida_dataTypes
-        return _cida_dataTypes[self.module.name]["dataTypes"].iterkeys().next()
+        global _cida_datatypes
+        self.store_datasets(service_name, uri)
+        datasets = list(_cida_datatypes[service_name]['URIs'][uri]["datasets"].iterkeys())
+        if datasets:
+            return datasets[0]
+        else:
+            return ''
 
-    def get_datatype_date(self, service_name, datatype_name, which_one="start"):
+    def get_uri_date(self, service_name, uri, which_one="start"):
         '''Returns the start and end data for a given service and datatype
         '''
-        global _cida_dataTypes
-        datatype = _cida_dataTypes[self.module.name]["dataTypes"][datatype_name]
-        if not datatype.has_key(which_one + 'Date'):
-            self.storeTimeRange(service_name, datatype_name)
+        global _cida_datatypes
+        if not _cida_datatypes[self.module.name]['URIs'][uri].has_key(which_one + 'Date'):
+            self.store_time_range(service_name, uri)
 
         if which_one.lower() == "start":
-            return datatype['startDate']
+            return _cida_datatypes[self.module.name]['URIs'][uri]['start_date']
         elif which_one.lower() == "end":
-            return datatype['endDate']
+            return _cida_datatypes[self.module.name]['URIs'][uri]['end_date']
 
-    def storeTimeRange(self, serviceName, dataType=None):
-        global _cida_dataTypes
-        if dataType is None:
-            dataType = self.get_default_datatype(serviceName)
+    def store_time_range(self, service_name, uri, dataType=None):
+        global _cida_datatypes
 
-        if not _cida_dataTypes[serviceName]["dataTypes"][dataType].has_key('startDate'):
-            timeRange = pyGDP.getTimeRange(_cida_dataTypes[serviceName]['URIs'][0], self.dataTypes[0])
-            _cida_dataTypes[serviceName]["dataTypes"][dataType]['startDate'] = timeRange[0]
-            _cida_dataTypes[serviceName]["dataTypes"][dataType]['endDate'] = timeRange[1]
+        self.store_datasets(service_name, uri)
 
-    def changed_URI(self):
+        dataType = self.get_default_datatype(service_name, uri)
+
+        if not uri or not dataType:
+            _cida_datatypes[service_name]['URIs'][uri]['start_date'] = ''
+            _cida_datatypes[service_name]['URIs'][uri]['end_date'] = ''
+        elif not _cida_datatypes[service_name]['URIs'][uri].has_key('start_date'):
+            timeRange = pyGDP.getTimeRange(uri, dataType)
+            _cida_datatypes[service_name]['URIs'][uri]['start_date'] = timeRange[0]
+            _cida_datatypes[service_name]['URIs'][uri]['end_date'] = timeRange[1]
+
+    def changed_field(self):
         self.URI = str(self.URI_combobox.currentText())
-        utils.update_vistrail(self, "URI", [self.URI])
+        self.store_datasets(self.module.name, self.URI)
+        self.store_time_range(self.module.name, self.URI)
+        self.update_datatypes()
+        self.populate_service_config()
+#          self.state_changed = True
 
-    def changed_datatype(self):
+    def changed_checked_field_values(self):
         treeviewIter = QtGui.QTreeWidgetItemIterator(self.datatypes_treeview)
-        self.dataTypes = []
+        self.datatypes = []
         while treeviewIter.value():
             item = treeviewIter.value()
             if item.checkState(0) == QtCore.Qt.Checked:
-                self.dataTypes.append(str(item.text(0)))
+                self.datatypes.append(str(item.text(0)))
 
             treeviewIter += 1
-        utils.update_vistrail(self, "dataType", self.dataTypes)
+#          self.state_changed = True
 
     def startDateChanged(self):
         self.startDate = str(self.startDateText.text())
-        utils.update_vistrail(self, "startDate", [self.startDate])
+#          self.state_changed = True
 
     def endDateChanged(self):
         self.endDate = str(self.endDateText.text())
-        utils.update_vistrail(self, "endDate", [self.endDate])
+#          self.state_changed = True
 
     def setMinDateLabel(self):
-        minStart = _cida_dataTypes[self.module.name]["dataTypes"][self.dataTypes[0]]['startDate']
+        minStart = _cida_datatypes[self.module.name]['URIs'][self.URI]['start_date']
         self.startdate_label.setText("Start Date: \n(min = " + minStart + ")")
 
     def setMaxDateLabel(self):
-        max_end = _cida_dataTypes[self.module.name]["dataTypes"][self.dataTypes[0]]['endDate']
+        max_end = _cida_datatypes[self.module.name]['URIs'][self.URI]['end_date']
         self.enddate_label.setText("End Date: \n(max = " + max_end + ")")
+
+    def disconnect_all(self):
+        try:
+            self.URI_combobox.currentIndexChanged.disconnect()
+        except TypeError:
+            pass
+        try:
+            self.datatypes_treeview.itemChanged.disconnect()
+        except TypeError:
+            pass
+        try:
+            self.endDateText.textChanged.disconnect()
+        except TypeError:
+            pass
+        try:
+            self.startDateText.textChanged.disconnect()
+        except TypeError:
+            pass
+
+#      def saveTriggered(self, *args, **kwargs):
+#          self.save_changes()
+#          self.disconnect_all()
+#
+#
+#      def resetTriggered(self):
+#          self.cancel_changes()
+#          self.disconnect_all()
 
 class Shapefile(Module):
     '''A Shapefile with parameters needed by GDP
@@ -603,6 +898,7 @@ class Shapefile(Module):
 
         #  check if the specified Shapefile already exists on the server
         shp_fname = self.getInputFromPort("File").name
+        shp_fname = utils.getFileRelativeToCurrentVT(shp_fname)
 
         if shp_fname.endswith(".shp"):
             #  we'll assume that this a shapefile
@@ -622,11 +918,13 @@ class Shapefile(Module):
         output_dict["local_fname"] = shp_fname
         output_dict["Field"] = self.getInputFromPort("Field")
         if self.hasInputFromPort("Value"):
-            output_dict["Value"] = self.getInputListFromPort("Value")
+            output_dict["Value"] = eval(self.getInputFromPort("Value"))
             if 'all_values' in output_dict["Value"]:
                 output_dict["Value"] = ['all_values']
         else:
             output_dict["Value"] = ['all_values']
+
+        output_dict['bbox'] = get_bbox_from_shape_params(output_dict)
 
         self.setResult('ShapefileParameters', output_dict)
 
@@ -639,16 +937,26 @@ class GDPShapeFileConfiguration(StandardModuleConfigurationWidget):
                    parent)
         self.setWindowTitle("Shapefile configuration")
 
-        self.fields = self.get_fields(utils.getPortValue(self, "File"))
-        self.checkedFieldValues = utils.get_port_value_list(self, "Value")
-        self.field = utils.getPortValue(self, "Field")
-        if not self.field and len(self.fields) > 0:
-            self.field = self.fields[0]
+
+        self.shapefile_fname = utils.getPortValue(self, "File")
+        if self.shapefile_fname:
+            self.fields = self.get_fields(utils.getPortValue(self, "File"))
+            self.checkedFieldValues = utils.getPortValue(self, "Value")
+            self.field = utils.getPortValue(self, "Field")
+            if not self.field and len(self.fields) > 0:
+                self.field = self.fields[0]
+        else:
+            self.fields = []
+            self.checkedFieldValues = []
+            self.field = ''
+
         self.build_gui()
 
     def get_fields(self, fname):
         '''returns a list of the fields in a Shapefile
         '''
+        if fname:
+            fname = utils.getFileRelativeToCurrentVT(fname)
         if fname == '':
             return []
         else:
@@ -668,6 +976,8 @@ class GDPShapeFileConfiguration(StandardModuleConfigurationWidget):
         '''returns a list of the unique values in a single field
         of a Shapefile
         '''
+        fname = utils.getFileRelativeToCurrentVT(fname)
+
         if fname == '':
             return []
 
@@ -708,7 +1018,7 @@ class GDPShapeFileConfiguration(StandardModuleConfigurationWidget):
         file_label = QtGui.QLabel("Shapefile: ")
         file_layout.addWidget(file_label)
         self.file_text = QtGui.QLineEdit(self)
-        self.file_text.setText(utils.getPortValue(self, "File"))
+        self.file_text.setText(self.shapefile_fname)
         self.file_text.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Maximum)
         file_layout.addWidget(self.file_text)
         browse_button = QtGui.QPushButton("browse", self)
@@ -721,12 +1031,12 @@ class GDPShapeFileConfiguration(StandardModuleConfigurationWidget):
         uri_label = QtGui.QLabel("Available Fields: ")
         uri_layout.addWidget(uri_label)
         self.shapefile_fields = QtGui.QComboBox(self)
-        self.populate_fields()
+
 
         uri_layout.addWidget(self.shapefile_fields)
         main_layout.addLayout(uri_layout)
 
-        QtCore.QObject.connect(self.shapefile_fields, QtCore.SIGNAL("currentIndexChanged(QString)"), self.changed_URI)
+        QtCore.QObject.connect(self.shapefile_fields, QtCore.SIGNAL("currentIndexChanged(QString)"), self.changed_field)
 
         datatype_layout = QtGui.QHBoxLayout()
         datatype_label = QtGui.QLabel("Available Values: ")
@@ -738,30 +1048,55 @@ class GDPShapeFileConfiguration(StandardModuleConfigurationWidget):
         self.datatypes_treeview.setColumnWidth(0, 200)
         self.datatypes_treeview.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
 
-        self.populate_datatypes()
-        self.datatypes_treeview.itemChanged.connect(self.changed_datatype)
+        if self.shapefile_fname:
+            self.populate_fields()
+            self.populate_datatypes()
+        self.datatypes_treeview.itemChanged.connect(self.changed_checked_field_values)
 
         datatype_layout.addWidget(self.datatypes_treeview)
         main_layout.addLayout(datatype_layout)
+
+        save_layout = QtGui.QHBoxLayout()
+        save_layout.setMargin(5)
+
+        self.OK = QtGui.QPushButton('&OK', self)
+        self.OK.setFixedWidth(110)
+        save_layout.addWidget(self.OK)
+        self.Cancel = QtGui.QPushButton('&Cancel', self)
+        self.Cancel.setFixedWidth(110)
+        save_layout.addWidget(self.Cancel)
+        main_layout.addLayout(save_layout)
+        self.connect(self.OK, QtCore.SIGNAL('clicked(bool)'),
+                     self.save_changes)
+        self.connect(self.Cancel, QtCore.SIGNAL('clicked(bool)'),
+                     self.close)
+
         self.setLayout(main_layout)
 
     def select_file(self):
-        self.file_text.setText(QtGui.QFileDialog.getOpenFileNameAndFilter(self,
-                                                "Shapefile (*.shp)"))
+        fname = QtGui.QFileDialog.getOpenFileNameAndFilter(self,
+                                                "Shapefile (*.shp)")
+        self.file_text.setText(fname[0])
         self.set_new_shapefile()
 
     def set_new_shapefile(self):
-        utils.update_vistrail(self, "File", [str(self.file_text.text())])
+#          utils.update_vistrail(self, "File", [str(self.file_text.text())])
         self.populate_fields()
         self.populate_datatypes()
 
     def populate_fields(self):
-        self.fields = self.get_fields(utils.getPortValue(self, "File"))
+        self.fields = self.get_fields(self.shapefile_fname)
 
+        self.shapefile_fields.blockSignals(True)
         self.shapefile_fields.clear()
+        self.shapefile_fields.blockSignals(False)
+
+        self.shapefile_fields.blockSignals(True)
         for field in self.fields:
             if not field is None:
                 self.shapefile_fields.addItem(field)
+        self.shapefile_fields.blockSignals(False)
+
         try:
             cur_index = [i for i in range(self.shapefile_fields.count()) if self.shapefile_fields.itemText(i) == self.field][0]
         except IndexError:
@@ -779,28 +1114,48 @@ class GDPShapeFileConfiguration(StandardModuleConfigurationWidget):
             child_item = QtGui.QTreeWidgetItem([str(fieldValue)])
             child_item.setFlags(QtCore.Qt.ItemIsUserCheckable |
                                 QtCore.Qt.ItemIsEnabled)
-            if fieldValue in self.checkedFieldValues:
+            if str(fieldValue) in self.checkedFieldValues:
                 child_item.setCheckState(0, QtCore.Qt.Checked)
             else:
                 child_item.setCheckState(0, QtCore.Qt.Unchecked)
             self.datatypes_treeview.addTopLevelItem(child_item)
 
-    def changed_URI(self):
+    def changed_field(self):
         self.field = str(self.shapefile_fields.currentText())
         self.values = self.get_field_values(utils.getPortValue(self, 'File'),
                                            self.field)
         self.populate_datatypes()
-        utils.update_vistrail(self, "Field", [self.field])
+#          utils.update_vistrail(self, "Field", [self.field])
 
-    def changed_datatype(self):
+    def changed_checked_field_values(self):
         treeviewIter = QtGui.QTreeWidgetItemIterator(self.datatypes_treeview)
-        self.dataTypes = []
+        self.checkedFieldValues = []
         while treeviewIter.value():
             item = treeviewIter.value()
             if item.checkState(0) == QtCore.Qt.Checked:
-                self.dataTypes.append(str(item.text(0)))
+                self.checkedFieldValues.append(str(item.text(0)))
             treeviewIter += 1
-        utils.update_vistrail(self, "Value", self.dataTypes)
+#          utils.update_vistrail(self, "Value", self.checkedFieldValues)
+
+    def saveTriggered(self):
+        self.save_changes()
+
+    def resetTriggered(self):
+        self.close()
+
+    def save_changes(self):
+        functions = [('Value', [str(self.checkedFieldValues)])]
+        self.controller.update_functions(self.module, functions)
+        functions = [("Field", [self.field])]
+        self.controller.update_functions(self.module, functions)
+        functions = [("File", [self.shapefile_fname])]
+        self.controller.update_functions(self.module, functions)
+        self.state_changed = False
+        self.close()
+
+    def ok_selected(self):
+        self.save_changes()
+        self.close()
 
 def convert_raster_to_shapefile_env(rasterfname, outfname):
     '''These services need a shapefile to load onto the server.
@@ -909,7 +1264,9 @@ def pyGDP_module_compute(instance):
     output_dict = {}
     for port in instance._input_ports:
         port_contents = instance.forceGetInputListFromPort(port[0])
-        if len(port_contents) == 1:
+        if port[0] == 'dataType' and len(port_contents) == 1:
+            output_dict[port[0]] = [port_contents[0]]
+        elif len(port_contents) == 1:
             output_dict[port[0]] = port_contents[0]
         elif len(port_contents) > 1:
             #  multiple entries found store them all
@@ -984,30 +1341,36 @@ def build_pyGDP_service_modules():
     new_classes = {}
     dataset_uris = pyGDP.getDataSetURI()
 
-    global _cida_dataTypes
+    global _cida_datatypes
 
     #  hardwired addition of additional server datasets.
-    dataset_uris.append(["hayhoe", "No abstract provided",
-                         ['dods://cida-eros-thredds1.er.usgs.gov:8082/thredds/dodsC/dcp/conus_grid.w_meta.ncml']])
+    dataset_uris.insert(1, ["GDP_Service", "This module is for THREDDS and OPeNDAP URIs not covered by the predefined convenience modules available in this package.",
+                         ['']])
 
-    print "Available gridded datasets"
+    services_fname = os.path.join(os.path.dirname(__file__), 'DynamicServicesLookup.csv')
+    with open(services_fname) as f:
+        f.readline()  #  ignore first line (header)
+        service_names = dict(csv.reader(f, delimiter=','))
+    service_names["GDP_Service"] = "GDP_Service"
+
     for dataSetURI in dataset_uris[1:]:
-        name_arr = dataSetURI[0].strip().split()
-        class_base = ''.join(n.capitalize() for n in name_arr)
-        m_name = class_base.split("/")[-1].split(".")[0]
+        if service_names.has_key(dataSetURI[0]):
+            short_name = service_names[dataSetURI[0]]
+        else:
+            print "new service skipped: ", service_names[dataSetURI[0]]
+            short_name = 'skip'
 
-
-        if not m_name.startswith("**provisional"):
+        if short_name != 'skip':
             m_doc = dataSetURI[1]
-            _cida_dataTypes[m_name] = {}
-            _cida_dataTypes[m_name]['abstract'] = m_doc
-            _cida_dataTypes[m_name]['URIs'] = [uri.replace("http", "dods")
-                        if "/dodsC/" in uri else uri for uri in dataSetURI[2]]
-            print dataSetURI[2]
+            _cida_datatypes[short_name] = {}
+            _cida_datatypes[short_name]['abstract'] = m_doc
+            _cida_datatypes[short_name]['URIs'] = {}
+            for uri in dataSetURI[2]:
+                _cida_datatypes[short_name]['URIs'][uri.replace("http", "dods")] = {}
 
             m_inputs = [('URI', '(edu.utah.sci.vistrails.basic:String)',
                          {'defaults':'["' + dataSetURI[2][0] + '"]'}),
-                        ('dataType', '(edu.utah.sci.vistrails.basic:String)'),
+                        ('dataType', '(edu.utah.sci.vistrails.basic:List)'),
                         ('startDate', '(edu.utah.sci.vistrails.basic:String)'),
                         ('endDate', '(edu.utah.sci.vistrails.basic:String)'), ]
             m_outputs = [('data_service_parameters',
@@ -1016,6 +1379,9 @@ def build_pyGDP_service_modules():
             klass_dict["compute"] = pyGDP_module_compute
 
             module_doc = "This module represents a single data provider listed by the GeoDataPortal"
+            module_doc += "\n\nGDP Title:  " + dataSetURI[0]
+            module_doc += "\n\nGDP Abstract:\n\t"
+            module_doc += m_doc
             module_doc += "\n\nThe input ports for this module provide means of selecting the "
             module_doc += "\nindividual data type(s) will be returned as well as limiting the "
             module_doc += "\ntemporal extent of the result. "
@@ -1024,16 +1390,15 @@ def build_pyGDP_service_modules():
             module_doc += "\nAdding or editing these values by hand is possible but not recommended."
             module_doc += "\nA user-friendly interface for changing these values is provided by "
             module_doc += "\nclicking on the module configure button."
-            module_doc += "\n\n\nThe GDP abstract for this data provider end point:\n"
-            module_doc += m_doc
-            m_class = new_module(Module, m_name, klass_dict, module_doc)
+
+            m_class = new_module(Module, short_name, klass_dict, module_doc)
             m_class.URI = dataSetURI[2][0]
             m_class._input_ports = utils.expand_ports(m_inputs)
             m_class._output_ports = utils.expand_ports(m_outputs)
             m_dict = {'moduleColor':INPUT_COLOR, 'moduleFringe':INPUT_FRINGE}
             m_dict['configureWidgetType'] = GDPServiceConfiguration
             m_dict['namespace'] = "data_services"
-            new_classes[m_name] = (m_class, m_dict)
+            new_classes[short_name] = (m_class, m_dict)
     return new_classes.values()
 
 def initialize():
@@ -1066,9 +1431,9 @@ _modules = [  #  Abstract modules only used internally
              (ShapefileParameters, {'abstract': True, 'namespace': 'Other'}),
              (DataServiceParameters, {'abstract': True, 'namespace': 'Other'}),
             #  service modules
-            (feature_weighted_grid_statistics, {'namespace': 'services'}),
-            (SubmitFeatureCoverageOPenDAP, {'namespace': 'services'}),
-            (SubmitCustomBioclim, {'namespace': 'services'}),
+            (feature_weighted_grid_statistics, {'namespace': 'processing_services'}),
+            (SubmitFeatureCoverageOPenDAP, {'namespace': 'processing_services'}),
+            (SubmitCustomBioclim, {'namespace': 'processing_services'}),
             #  Inputs
             (Shapefile, {'configureWidgetType': GDPShapeFileConfiguration,
                          'namespace': 'vector_inputs'}),
